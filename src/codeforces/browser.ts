@@ -1,4 +1,6 @@
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import * as cheerio from 'cheerio';
 import * as z from 'zod/v4';
 import { Mutex, sleep } from './async.js';
@@ -88,6 +90,7 @@ export class CodeforcesBrowser implements BrowserAccess {
   private authError?: CodeforcesError;
   private credentialsAttempted = false;
   private stateError?: CodeforcesError;
+  private storageStateHash?: string;
 
   constructor(private readonly env: NodeJS.ProcessEnv = process.env,
     private readonly launch: () => Promise<Browser> = () => chromium.launch({ headless: true }),
@@ -96,8 +99,8 @@ export class CodeforcesBrowser implements BrowserAccess {
   knownHandle(): string | undefined { return this.env.CF_HANDLE || this.status.handle || undefined; }
 
   private async getContext(): Promise<BrowserContext> {
-    if (this.context) return this.context;
     if (this.env.CF_BROWSER_CDP_URL) {
+      if (this.context) return this.context;
       let endpoint: URL;
       try { endpoint = new URL(this.env.CF_BROWSER_CDP_URL); }
       catch { throw new CodeforcesError('CF_BROWSER_CDP_URL must be a local HTTP URL.', 'INVALID_INPUT'); }
@@ -116,13 +119,29 @@ export class CodeforcesBrowser implements BrowserAccess {
         throw new CodeforcesError('Local Chrome CDP is unavailable. Run npm run session:create, log in manually, and retry.', 'BROWSER_UNAVAILABLE');
       }
     }
-    let storageState: StorageState;
-    if (this.env.CF_STORAGE_STATE_B64) {
+    let storageState: StorageState | undefined;
+    if (this.env.CF_STORAGE_STATE_B64_FILE) {
+      // Cloud Run's mounted latest-version secret is read on every operation.
+      // Recreate only our own context after an operator rotates the session.
+      let encoded: string;
+      try { encoded = (await readFile(this.env.CF_STORAGE_STATE_B64_FILE, 'utf8')).trim(); }
+      catch { throw new CodeforcesError('Configured storage-state secret is unavailable.', 'CF_AUTH_REQUIRED'); }
+      storageState = decodeStorageState(encoded);
+      const hash = createHash('sha256').update(encoded).digest('hex');
+      if (this.context && hash !== this.storageStateHash) {
+        await this.context.close().catch(() => undefined);
+        this.context = undefined;
+        this.status = { authenticated: false, handle: null, method: 'storage_state', message: 'Codeforces session must be verified.' };
+      }
+      this.storageStateHash = hash;
+    }
+    if (this.context) return this.context;
+    if (!storageState && this.env.CF_STORAGE_STATE_B64) {
       try { storageState = decodeStorageState(this.env.CF_STORAGE_STATE_B64.trim()); }
       catch (error) { this.stateError = error as CodeforcesError; }
     }
     try {
-      this.browser = await this.launch();
+      this.browser ??= await this.launch();
       this.ownsBrowser = true;
       this.context = await this.browser.newContext({ storageState, locale: 'en-US', acceptDownloads: false, serviceWorkers: 'block' });
       this.context.setDefaultTimeout(10_000);
@@ -162,7 +181,8 @@ export class CodeforcesBrowser implements BrowserAccess {
   }
 
   async getSessionStatus(): Promise<SessionStatus> {
-    const method: AuthMethod = this.env.CF_BROWSER_CDP_URL ? 'cdp' : this.env.CF_STORAGE_STATE_B64 ? 'storage_state' :
+    const method: AuthMethod = this.env.CF_BROWSER_CDP_URL ? 'cdp' :
+      this.env.CF_STORAGE_STATE_B64_FILE || this.env.CF_STORAGE_STATE_B64 ? 'storage_state' :
       this.env.CF_HANDLE && this.env.CF_PASSWORD ? 'credentials' : 'none';
     if (method === 'none') {
       this.authError = new CodeforcesError('Configure CF_BROWSER_CDP_URL, CF_STORAGE_STATE_B64, or CF_HANDLE and CF_PASSWORD.', 'CF_AUTH_REQUIRED');
@@ -223,6 +243,8 @@ export class CodeforcesBrowser implements BrowserAccess {
       }
       this.context = undefined; this.browser = undefined;
       this.ownsBrowser = false;
+      this.storageStateHash = undefined;
+      this.stateError = undefined;
       this.credentialsAttempted = false;
       this.status = { authenticated: false, handle: null, method: 'none', message: 'Browser session is closed.' };
     });

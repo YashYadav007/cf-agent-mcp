@@ -20,7 +20,7 @@ export function loadExperimentConfig(env: NodeJS.ProcessEnv = process.env): Expe
       throw new CodeforcesError('Exactly four problems are required.', 'EXPERIMENT_CONFIG_ERROR');
     if (env.EXPERIMENT_LANGUAGE && env.EXPERIMENT_LANGUAGE !== 'JAVA_17')
       throw new CodeforcesError('Only Java 17 is supported.', 'EXPERIMENT_CONFIG_ERROR');
-    if (!env.CF_STORAGE_STATE_B64 && !env.CF_BROWSER_CDP_URL)
+    if (!env.CF_STORAGE_STATE_B64_FILE && !env.CF_STORAGE_STATE_B64 && !env.CF_BROWSER_CDP_URL)
       throw new CodeforcesError('Configure a manually authenticated storage state or local CDP session.', 'EXPERIMENT_CONFIG_ERROR');
   }
   const defaults = [[0, 25], [25, 50], [50, 80], [80, 110]] as const;

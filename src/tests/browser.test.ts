@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { CodeforcesBrowser, authenticatedHandle, decodeStorageState, hasManualVerification } from '../codeforces/browser.js';
 import { browserMock, header } from './fixtures.js';
 import type { Browser } from 'playwright';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 const state = Buffer.from(JSON.stringify({ cookies: [], origins: [] })).toString('base64');
 
 test('session status without credentials is unauthenticated and does not launch Chromium', async () => {
@@ -18,6 +21,33 @@ test('valid storage state takes priority and reuses the context', async () => {
   await browser.getSessionStatus();
   assert.equal(mock.calls.contexts, 1); assert.equal(mock.calls.clicks, 0);
   await browser.closeBrowser(); assert.equal(mock.calls.closes, 1);
+});
+test('mounted storage-state rotation is re-read without restarting or credential login', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'cf-auth-test-'));
+  const file = join(directory, 'state-b64');
+  const rotated = Buffer.from(JSON.stringify({ cookies: [], origins: [{ origin: 'https://codeforces.com',
+    localStorage: [{ name: 'test', value: 'rotated' }] }] })).toString('base64');
+  const mock = browserMock({ html: header('tester') });
+  const browser = new CodeforcesBrowser({ CF_HANDLE: 'tester', CF_PASSWORD: 'DO_NOT_LEAK',
+    CF_STORAGE_STATE_B64_FILE: file }, mock.launch);
+  try {
+    await writeFile(file, state, { mode: 0o600 });
+    assert.equal((await browser.ensureLoggedIn()).handle, 'tester');
+    await writeFile(file, rotated);
+    assert.equal((await browser.ensureLoggedIn()).handle, 'tester');
+    assert.equal(mock.calls.contexts, 2);
+    assert.equal(mock.calls.launches, 1);
+    assert.equal(mock.calls.clicks, 0);
+    await writeFile(file, 'DO_NOT_LEAK!');
+    const invalid = await browser.getSessionStatus();
+    assert.equal(invalid.authenticated, false);
+    assert.doesNotMatch(JSON.stringify(invalid), /DO_NOT_LEAK/);
+    await writeFile(file, rotated);
+    assert.equal((await browser.ensureLoggedIn()).authenticated, true);
+  } finally {
+    await browser.closeBrowser();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 test('expired storage state does not fall back to credential POSTs', async () => {
   const mock = browserMock({ credentialLogin: true });

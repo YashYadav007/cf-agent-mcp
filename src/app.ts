@@ -52,7 +52,7 @@ export function createApp(options: AppOptions = {}, browser: BrowserAccess = cod
   if (!local && env.ALLOW_REAL_SUBMISSIONS === 'true') {
     const safety = readSubmissionSafety(env);
     if (!env.SUPABASE_URL || !getSupabaseAdminKey(env) || !safety.expectedHandle ||
-      !(env.CF_STORAGE_STATE_B64 || (env.CF_HANDLE && env.CF_PASSWORD)))
+      !(env.CF_STORAGE_STATE_B64_FILE || env.CF_STORAGE_STATE_B64 || (env.CF_HANDLE && env.CF_PASSWORD)))
       throw new Error('Remote real submissions require Supabase, CF_EXPECTED_HANDLE, and Codeforces auth configuration.');
   }
   const api = new CodeforcesApi(options.timeoutMs ?? 15000);
