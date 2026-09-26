@@ -1,0 +1,37 @@
+name: Codeforces experiment reconciliation
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: codeforces-experiment-reconciliation
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      EXPERIMENT_ENABLED: ${{ vars.EXPERIMENT_ENABLED }}
+      EXPERIMENT_HANDLE: ${{ vars.EXPERIMENT_HANDLE }}
+      CF_HANDLE: ${{ vars.EXPERIMENT_HANDLE }}
+      CF_EXPECTED_HANDLE: ${{ vars.EXPERIMENT_HANDLE }}
+      CF_STORAGE_STATE_B64: ${{ secrets.CF_STORAGE_STATE_B64 }}
+      SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      GITHUB_TRIGGER_REPO: ${{ vars.GITHUB_TRIGGER_REPO }}
+      GITHUB_TRIGGER_TOKEN: ${{ secrets.GITHUB_TRIGGER_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run orchestrator:once

@@ -1,0 +1,17 @@
+node_modules
+dist
+.git
+.env
+.env.*
+!.env.example
+.auth
+supabase/.temp
+**/*storage-state*.json
+**/*storageState*.json
+**/*cookies*.json
+**/*session*.json
+**/*auth*.json
+data
+*.log
+playwright-report
+test-results

@@ -1,0 +1,50 @@
+{
+  "name": "codeforces-controller-mcp",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.check.json",
+    "test": "node --import tsx --test src/**/*.test.ts",
+    "session:create": "bash scripts/launch-codeforces-chrome.sh",
+    "session:export": "tsx scripts/export-storage-state.ts",
+    "contest:authorize": "tsx scripts/manage-contest.ts authorize",
+    "contest:complete": "tsx scripts/manage-contest.ts complete",
+    "contest:block": "tsx scripts/manage-contest.ts block",
+    "contest:status": "tsx scripts/contest-registration.ts status",
+    "contest:register": "tsx scripts/contest-registration.ts register",
+    "contest:eligible": "tsx scripts/contest-eligibility.ts eligible",
+    "account:profile": "tsx scripts/contest-eligibility.ts profile",
+    "orchestrator:once": "tsx scripts/orchestrator.ts once",
+    "orchestrator:status": "tsx scripts/orchestrator.ts status",
+    "orchestrator:dry-run": "tsx scripts/orchestrator.ts dry-run",
+    "orchestrator:contest": "tsx scripts/orchestrator.ts contest",
+    "browsers:install": "playwright install chromium",
+    "test:browser": "tsx scripts/verify-browser.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/express": "^2.0.1",
+    "@modelcontextprotocol/node": "^2.1.0",
+    "@modelcontextprotocol/server": "^2.1.0",
+    "@supabase/supabase-js": "2.117.2",
+    "cheerio": "^1.2.0",
+    "domhandler": "^5.0.3",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "jose": "6.2.12",
+    "playwright": "1.63.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.0.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}
