@@ -1,5 +1,6 @@
 import type { ContestRegistrationStatus } from '../codeforces/registration.js';
 import type { PendingOperation, Ordinal, RunState } from './stateMachine.js';
+import type { WakeupReason } from './scheduling.js';
 
 export interface ExperimentRun {
   runId: string;
@@ -29,6 +30,10 @@ export interface ExperimentRun {
   resumeState: RunState | null;
   ratingDeadlineAt: string | null;
   completedAt: string | null;
+  nextReconcileAt: string | null;
+  nextReconcileReason: WakeupReason | null;
+  scheduledTaskName: string | null;
+  lastRatingCheckAt: string | null;
   version: number;
   leaseOwner: string | null;
   leaseExpiresAt: string | null;

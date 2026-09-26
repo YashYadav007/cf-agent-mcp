@@ -1,11 +1,13 @@
 node_modules/
 dist/
+coverage/
 .env
 .env.*
 !.env.example
 .auth/
 .auth/codeforces-chrome-profile/
 .auth/storage-state.json
+storage-state.json
 supabase/.temp/
 data/
 **/*storage-state*.json
@@ -18,4 +20,5 @@ data/
 playwright-report/
 test-results/
 *.log
+tmp-*.ts
 .DS_Store

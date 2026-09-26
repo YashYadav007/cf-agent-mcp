@@ -51,7 +51,7 @@ test('four-problem state selects A-D, counts distinct indices, preserves retries
   let run = createContestRun(2268, problems);
   assert.deepEqual(run.problemOrder, ['A', 'B', 'C', 'D']);
   assert.deepEqual(run.scheduleTargets.map((target) => [target.problemIndex, target.earliestOffsetMinutes, target.latestOffsetMinutes]),
-    [['A', 10, 25], ['B', 30, 50], ['C', 55, 80], ['D', 85, 110]]);
+    [['A', 0, 25], ['B', 25, 50], ['C', 50, 80], ['D', 80, 110]]);
   assert.equal(run.currentProblem, null);
   run = startContestRun(run, '2026-09-26T00:00:00Z');
   run = recordSubmissionAttempt(run, 'A');

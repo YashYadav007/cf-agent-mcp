@@ -29,6 +29,7 @@
     "test:browser": "tsx scripts/verify-browser.ts"
   },
   "dependencies": {
+    "@google-cloud/tasks": "7.2.0",
     "@modelcontextprotocol/express": "^2.0.1",
     "@modelcontextprotocol/node": "^2.1.0",
     "@modelcontextprotocol/server": "^2.1.0",
@@ -37,6 +38,7 @@
     "domhandler": "^5.0.3",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
+    "google-auth-library": "11.1.0",
     "jose": "6.2.12",
     "playwright": "1.63.0",
     "zod": "^4.6.5"

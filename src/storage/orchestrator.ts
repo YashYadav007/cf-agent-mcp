@@ -24,6 +24,10 @@ function fromRow(row: Record<string, unknown>): ExperimentRun {
     lastAuthCheckAt: row.last_auth_check_at as string | null, recoveryReason: row.recovery_reason as string | null,
     resumeState: row.resume_state as RunState | null, ratingDeadlineAt: row.rating_deadline_at as string | null,
     completedAt: row.completed_at as string | null, version: Number(row.version),
+    nextReconcileAt: row.next_reconcile_at as string | null ?? null,
+    nextReconcileReason: row.next_reconcile_reason as ExperimentRun['nextReconcileReason'] ?? null,
+    scheduledTaskName: row.scheduled_task_name as string | null ?? null,
+    lastRatingCheckAt: row.last_rating_check_at as string | null ?? null,
     leaseOwner: row.lease_owner as string | null, leaseExpiresAt: row.lease_expires_at as string | null,
   };
 }
@@ -47,6 +51,8 @@ function runRow(run: ExperimentRun): Record<string, unknown> {
     auth_recovered_at: run.authRecoveredAt, last_auth_check_at: run.lastAuthCheckAt,
     recovery_reason: run.recoveryReason, resume_state: run.resumeState,
     rating_deadline_at: run.ratingDeadlineAt, lease_owner: run.leaseOwner, lease_expires_at: run.leaseExpiresAt,
+    next_reconcile_at: run.nextReconcileAt, next_reconcile_reason: run.nextReconcileReason,
+    scheduled_task_name: run.scheduledTaskName, last_rating_check_at: run.lastRatingCheckAt,
     updated_at: new Date().toISOString(),
   };
 }

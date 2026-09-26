@@ -1,6 +1,6 @@
 # Codeforces controller MCP
 
-TypeScript controller for an explicitly authorized Codeforces AI/test-account experiment, exposed to ChatGPT Work through Streamable HTTP. The controller reads contests/statements and the configured account's official profile, manages one account session, registers that account for an eligible Div.1 contest, submits supplied Java 17 source, and tracks verdicts. It does not solve problems, call an LLM/OpenAI/ChatGPT API, watch contests, schedule submissions, or fetch submitted source code.
+TypeScript controller for an explicitly authorized Codeforces AI/test-account experiment, exposed to ChatGPT Work through Streamable HTTP. The controller discovers strict Div.1 contests, reconciles registration and account state, schedules short future wakeups, opens deterministic Work trigger PRs, submits supplied Java 17 source through explicit MCP calls, and tracks verdicts. It does not solve problems, call an LLM/OpenAI/ChatGPT API, automatically generate or submit source, or fetch other contestants' submitted source code.
 
 ## Local installation
 
@@ -71,6 +71,16 @@ Load environment variables through `.env` locally or through the deployment secr
 | `CF_ALLOWED_CONTEST_IDS` | unset | Optional extra static restriction. When set, the contest must also have active Supabase authorization. |
 | `CF_EXPECTED_HANDLE` | unset | Experiment account handle; required for remote real submissions. |
 | `CF_DUPLICATE_WINDOW_SECONDS` | `120` | Identical source retry window, 1–3600 seconds. |
+| `EXPERIMENT_ENABLED` | `false` | Enables the autonomous registration/Work-trigger reconciler. Leave false for a safe MCP-only deployment. |
+| `EXPERIMENT_HANDLE` | unset | Authorized experiment handle; must match `CF_EXPECTED_HANDLE` and any configured `CF_HANDLE`. |
+| `EXPERIMENT_PROBLEMS` / `EXPERIMENT_LANGUAGE` | `4` / `JAVA_17` | Fixed four-problem, Java 17 experiment policy. |
+| `PROBLEM_N_EARLIEST_MINUTE` / `PROBLEM_N_LATEST_MINUTE` | 0–25, 25–50, 50–80, 80–110 | Optional ordered problem trigger windows for N = 1…4. |
+| `GITHUB_TRIGGER_REPO` | unset | Target repository, such as `YashYadav007/cf-agent-mcp`; only required when a Work PR is due. |
+| `GITHUB_TRIGGER_TOKEN` | unset | Scoped GitHub token for branch/file/PR creation; inject from Secret Manager, only needed at a due trigger. |
+| `GCP_PROJECT_ID` / `GCP_REGION` | unset | Google Cloud project and Cloud Tasks queue region. |
+| `CLOUD_TASKS_QUEUE` | unset | Queue for one-shot run wakeups. |
+| `ORCHESTRATOR_SERVICE_URL` | unset | Canonical Cloud Run HTTPS **base** URL, preferably the `run.app` URL; used as the task ID-token audience. |
+| `CLOUD_TASKS_SERVICE_ACCOUNT` | unset | Dedicated service account email allowed to invoke the internal reconciler. |
 
 Remote MCP mode requires OAuth, an explicit `ALLOWED_HOSTS` list, and Supabase configuration. The chosen OAuth provider must issue signed JWT access tokens with the configured audience and `cf.read`/`cf.submit` scopes. This repository is the resource server and does not issue tokens or implement an authorization server. Configure a provider that supports OAuth 2.1 authorization-code with PKCE and dynamic client registration or pre-register ChatGPT Work as required by that provider. `/.well-known/oauth-protected-resource/mcp` advertises the authorization server; `/mcp` returns HTTP Bearer challenges and an MCP tool error result containing `_meta["mcp/www_authenticate"]` for missing/insufficient scopes. `tools/list` remains available for discovery and declares the scope on each tool. Read tool calls require `cf.read`; `register_contest` and `submit_solution` require `cf.submit`. `submit_solution` also requires the server safety switch and active Supabase contest authorization. Supabase is used only for storage here. This verifier does not assume Supabase Auth supports these custom scopes. A future Supabase Auth integration would need an explicit permission-claim mapping and server-side enforcement, for example a `cf_permissions` claim inserted by a Custom Access Token Hook.
 
@@ -223,15 +233,15 @@ CF_BROWSER_CDP_URL=http://127.0.0.1:9222 npm run contest:register -- 2268
 
 `contest:status` only navigates and reads. `contest:register` is a real Codeforces action; use it only when you intend to register. If Chrome presents verification, complete it manually in the visible browser and run the read-only status command again. The CLI never closes the user's Chrome. Without `CF_BROWSER_CDP_URL`, both commands retain the headless/storage-state behavior used in deployment.
 
-The command and MCP tool use the same service. Before a click, a verification challenge yields `SESSION_REQUIRES_MANUAL_LOGIN`; a Codeforces rating rejection yields `CONTEST_REGISTRATION_INELIGIBLE`; a non-Div.1 contest yields `CONTEST_DIVISION_NOT_ALLOWED`. Each prevents mutation. After a click, a timeout, challenge, or unconfirmed page yields `REGISTRATION_RESULT_UNCERTAIN`; the click is never retried automatically. Use `contest:status` before any later explicit attempt. Other preflight errors include `CONTEST_NOT_FOUND`, `CONTEST_ALREADY_FINISHED`, `REGISTRATION_NOT_OPEN`, `REGISTRATION_CLOSED`, `CF_AUTH_REQUIRED`, and `ACCOUNT_MISMATCH`. Registration is independent of `ALLOW_REAL_SUBMISSIONS`, which remains the submission kill switch. No contest watcher or automatic registration schedule exists in this repository.
+The command and MCP tool use the same service. Before a click, a verification challenge yields `SESSION_REQUIRES_MANUAL_LOGIN`; a Codeforces rating rejection yields `CONTEST_REGISTRATION_INELIGIBLE`; a non-Div.1 contest yields `CONTEST_DIVISION_NOT_ALLOWED`. Each prevents mutation. After a click, a timeout, challenge, or unconfirmed page yields `REGISTRATION_RESULT_UNCERTAIN`; the click is never retried automatically. Use `contest:status` before any later explicit attempt. Other preflight errors include `CONTEST_NOT_FOUND`, `CONTEST_ALREADY_FINISHED`, `REGISTRATION_NOT_OPEN`, `REGISTRATION_CLOSED`, `CF_AUTH_REQUIRED`, and `ACCOUNT_MISMATCH`. Registration is independent of `ALLOW_REAL_SUBMISSIONS`, which remains the submission kill switch. The separate reconciler can discover, register, and schedule the authorized experiment when `EXPERIMENT_ENABLED=true`.
 
 ### Div.1 eligibility and four-problem run state
 
 `npm run contest:eligible -- 2268` is read-only. It refreshes the configured account through official `user.info`, checks official contest metadata for an upcoming regular Div.1 round, then checks Codeforces registration status. Local rating is informational: Codeforces' displayed eligibility decision takes precedence. The pure selector rejects Div.2/3/4, Educational, nonregular, and nonupcoming contests. It chooses contest 2268, never sibling 2269, for the combined Round 1124 example. The command does not register or authorize a contest.
 
-`src/contest/run.ts` defines server-side primitives for a future external watcher/Work workflow. It takes the first four distinct official problem indices in order (normally A, B, C, D), never starts a fifth, counts corrections to A as attempts on the same distinct problem, and advances only after an `OK` verdict. Each problem carries a persisted target window: A 10–25, B 30–50, C 55–80, D 85–110 minutes from contest start. These are scheduling targets for an external scheduler; the MCP never waits through a window or schedules a submission.
+`src/contest/run.ts` defines four-distinct-problem policy primitives. The orchestrator takes the first four distinct official problem indices in order (normally A, B, C, D), never starts a fifth, and advances serially after each terminal automated outcome. Corrections to A still concern one distinct problem. Persisted trigger targets are A 0–25, B 25–50, C 50–80, D 80–110 minutes from contest start. P1 can trigger at the official start time; later problems wait for their predecessor even if their own earliest time has arrived. The MCP never sleeps through a window or schedules a submission.
 
-`cf_contest_runs` stores the run status, problem order, current problem, distinct indices started/completed, attempt counts, verdicts, target windows, timestamps, and a version for conflict detection. Apply `supabase/migrations/20260926142854_cf_contest_runs.sql` before using this optional server-side store. It is accessible only with the server-side Supabase key; there is no public MCP run-state mutation tool. The future watcher still owns the sequence: refresh profile, check registration, register once if eligible, explicitly authorize the contest in `authorized_contests`, use an external start trigger, and mark both run and authorization complete afterward. This phase adds no watcher or Work trigger.
+`cf_contest_runs` stores the run status, problem order, current problem, timestamps, and a version for conflict detection. `cf_contest_run_problems` stores each selected index, target window, trigger, submission ID, and verdict. The orchestrator migration and the new wakeup migration add the state machine and next scheduled task metadata. Only the server-side Supabase key can write these tables; no public MCP tool can mutate a run. The reconciler owns the sequence from fresh profile and registration through authorization, Work triggers, verdicts, and rating reconciliation.
 
 ### submit_solution — Java 17 only
 
@@ -299,7 +309,7 @@ All official API attempts share a process-wide limiter with at least two seconds
 
 Writes use serialized read-modify-write, a synced temporary file, and atomic rename with `0600` file permissions. Nonexistent/empty storage works; malformed existing data is reported rather than erased. Separate `attempt-<uuid>.json` files record `prepared`, `confirmed`, or `uncertain` attempts without source or session material. A crash can leave `prepared` even if the upstream submission happened; reconcile manually before another invocation. There is no automatic attempt recovery/resubmission.
 
-`SubmissionStore` has `FileSubmissionStore` for local metadata and `SupabaseSubmissionStore` for persistent metadata and contest authorization. Configure `SUPABASE_URL` with `SUPABASE_SECRET_KEY` (preferred) or the legacy `SUPABASE_SERVICE_ROLE_KEY` to select Supabase; remote binding requires a server-side key. A URL alone is allowed locally and uses file storage. A `sb_publishable_` key is rejected for private access. Apply both SQL migrations in `supabase/migrations/` before enabling writes. They create metadata, attempt, and `authorized_contests` tables, enable RLS, revoke anonymous/authenticated access, and grant only service-role access. They store no source code, passwords, cookies, or CSRF tokens. A database function uses a transaction lock to reserve a fingerprint within the duplicate window. Local files are ephemeral on Cloud Run and are never the production source of truth. The local file store never authorizes a real contest, so local submission tests must use mocked authorization or a configured Supabase store.
+`SubmissionStore` has `FileSubmissionStore` for local metadata and `SupabaseSubmissionStore` for persistent metadata and contest authorization. Configure `SUPABASE_URL` with `SUPABASE_SECRET_KEY` (preferred) or the legacy `SUPABASE_SERVICE_ROLE_KEY` to select Supabase; remote binding requires a server-side key. A URL alone is allowed locally and uses file storage. A `sb_publishable_` key is rejected for private access. Apply pending SQL migrations in `supabase/migrations/` before enabling writes. The earlier migrations create metadata, attempt, authorization, and run tables, enable RLS, revoke anonymous/authenticated access, and grant only service-role access. They store no source code, passwords, cookies, or CSRF tokens. A database function uses a transaction lock to reserve a fingerprint within the duplicate window. Local files are ephemeral on Cloud Run and are never the production source of truth. The local file store never authorizes a real contest, so local submission tests must use mocked authorization or a configured Supabase store.
 
 ### Dynamic contest authorization
 
@@ -313,7 +323,7 @@ npm run contest:complete -- 4
 npm run contest:block -- 4
 ```
 
-To set an expiry, pass a future ISO timestamp after the ID, for example `npm run contest:authorize -- 4 2026-10-01T00:00:00Z`. The script marks its changes with `source=manual`; a future watcher can call the same store methods with its own source. Run the migration before using these commands. Keep the server-only key out of shell history, logs, and client applications.
+To set an expiry, pass a future ISO timestamp after the ID, for example `npm run contest:authorize -- 4 2026-10-01T00:00:00Z`. The script marks its changes with `source=manual`; the reconciler uses the same store methods with `source=watcher` after confirmed registration. Run the migration before using these commands. Keep the server-only key out of shell history, logs, and client applications.
 
 ## Submission pacing policy
 
@@ -321,10 +331,10 @@ The experiment is 120 minutes and targets four Accepted problems. The pure helpe
 
 | Slot | Window from contest start |
 | --- | --- |
-| 1 | 10–25 minutes |
-| 2 | 30–50 minutes |
-| 3 | 55–80 minutes |
-| 4 | 85–110 minutes |
+| 1 | 0–25 minutes |
+| 2 | 25–50 minutes |
+| 3 | 50–80 minutes |
+| 4 | 80–110 minutes |
 
 `getSubmissionWindow(slot)` returns a window. `evaluateSubmissionTiming({contestStartTime,slot,now})` accepts Dates, ISO strings, or epoch **milliseconds**. Multiply a Codeforces `startTimeSeconds` value by 1000 first.
 
@@ -334,14 +344,14 @@ evaluateSubmissionTiming({
   slot: 1,
   now: '2026-09-25T12:05:00Z'
 });
-// { allowedNow:false, windowStart:'2026-09-25T12:10:00.000Z',
-//   windowEnd:'2026-09-25T12:25:00.000Z', waitMilliseconds:300000,
-//   status:'BEFORE_WINDOW' }
+// { allowedNow:true, windowStart:'2026-09-25T12:00:00.000Z',
+//   windowEnd:'2026-09-25T12:25:00.000Z', waitMilliseconds:0,
+//   status:'INSIDE_WINDOW' }
 ```
 
 Before the window, future orchestration may schedule later. Inside the inclusive window, submission is allowed immediately. After the window, `allowedNow:true`, `waitMilliseconds:0`, and `AFTER_WINDOW` prioritize correctness without adding delay. These helpers do not schedule, sleep, keep MCP calls open, or enforce timing inside `submit_solution`.
 
-Prefer one real submission per problem. The future solver must compile and test samples locally first. A later orchestration layer may decide whether a rejected submission merits another attempt; this controller never fixes or resubmits automatically. Every real attempt requires a distinct explicit `submit_solution` invocation, so four successful first attempts can produce exactly four submissions.
+Prefer one real submission per problem. Work must compile and test samples locally first. This controller never fixes or resubmits automatically. Every real attempt requires a distinct explicit `submit_solution` invocation, so four successful first attempts can produce exactly four submissions.
 
 ## Agent solution-generation policy
 
@@ -362,7 +372,7 @@ The refactoring pass must preserve the algorithm and complexity, keep normal com
 
 The image uses the official Playwright Node image `mcr.microsoft.com/playwright:v1.63.0-noble`, matching the exact package version. Chromium and its Linux dependencies are included. The service launches headlessly as `pwuser`, binds `0.0.0.0`, uses Cloud Run's `PORT` (default 8080 in production), and stops accepting writes on SIGTERM/SIGINT before closing Chromium. No X11 desktop is needed. The container does not add unsafe Chromium flags. Cloud Run's 1 GiB memory allocation is the initial browser budget; tune only after observing memory usage.
 
-Prerequisites: Google Cloud SDK, billing-enabled project, Cloud Run/Cloud Build/Artifact Registry/Secret Manager APIs enabled, an Artifact Registry Docker repository, both SQL migrations applied in Supabase, an OAuth provider configured to issue JWT access tokens for the canonical MCP resource URL, and a manually created Codeforces AI/test-account storage state. Grant the Cloud Run runtime service account Secret Manager Secret Accessor for the two secrets. Store `CF_STORAGE_STATE_B64` and the server-only `SUPABASE_SECRET_KEY` in Secret Manager; never place them in command history, the container image, or repository. The storage state is decoded only in process memory on cold start; it is not written to disk. If Codeforces presents a challenge or the state expires, run the headed helper locally again, update the secret, and redeploy. `/health` never contacts Codeforces or Supabase.
+Prerequisites: Google Cloud SDK, billing-enabled project, Cloud Run/Cloud Build/Artifact Registry/Secret Manager APIs enabled, an Artifact Registry Docker repository, pending SQL migrations reviewed and applied in Supabase, an OAuth provider configured to issue JWT access tokens for the canonical MCP resource URL, and a manually created Codeforces AI/test-account storage state. Autonomous mode additionally needs Cloud Tasks and Cloud Scheduler APIs, a queue, a dedicated internal-caller service account, and the new wakeup migration. Grant the Cloud Run runtime service account Secret Manager Secret Accessor for its secrets. Store `CF_STORAGE_STATE_B64`, the server-only Supabase key, and (for a due Work PR) `GITHUB_TRIGGER_TOKEN` in Secret Manager; never place them in command history, the image, or repository. The storage state is decoded only in process memory on cold start. If Codeforces presents a challenge or the state expires, refresh the legitimate session and configured secret; a later reconciliation pass checks it again. `/health` never contacts Codeforces or Supabase.
 
 Build locally when Docker is available:
 
@@ -401,7 +411,7 @@ export CF_EXPECTED_HANDLE=YOUR_TEST_ACCOUNT
 ./scripts/deploy-cloud-run.sh
 ```
 
-The helper references existing Secret Manager secrets, never embeds their values. `SUPABASE_SECRET_NAME` selects the preferred `SUPABASE_SECRET_KEY` binding; `SUPABASE_SERVICE_ROLE_SECRET_NAME` remains available for a legacy service-role secret.
+The helper references existing Secret Manager secrets, never embeds their values. `SUPABASE_SECRET_NAME` selects the preferred `SUPABASE_SECRET_KEY` binding; `SUPABASE_SERVICE_ROLE_SECRET_NAME` remains available for a legacy service-role secret. For autonomous mode, set `EXPERIMENT_ENABLED=true`, matching `EXPERIMENT_HANDLE` and `CF_EXPECTED_HANDLE`, all five Cloud Tasks configuration variables in the table above, `GITHUB_TRIGGER_REPO=YashYadav007/cf-agent-mcp`, `CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT`, and `GITHUB_TRIGGER_TOKEN_SECRET_NAME` before running the helper. The token is checked only when a Work PR is actually due. Leave `ALLOW_REAL_SUBMISSIONS=false` until the separate, authorized real submission rollout.
 
 If using a legacy service-role key locally, leave `SUPABASE_SECRET_NAME` unset and set `SUPABASE_SERVICE_ROLE_SECRET_NAME` instead. Once that Google Cloud secret exists, add its value from the ignored `.env` without printing it:
 
@@ -423,9 +433,9 @@ export CF_STORAGE_STATE_B64="$(node -e 'process.stdout.write(require("node:fs").
 node -e 'process.stdout.write(require("node:fs").readFileSync(".auth/storage-state.json").toString("base64"))' | gcloud secrets versions add "$CF_STORAGE_STATE_SECRET_NAME" --project "$GCP_PROJECT_ID" --data-file=-
 ```
 
-Add the encoded value to Secret Manager using an input file or stdin, avoiding terminal output. Provision the Supabase server-only secret key separately through the Google Cloud console or a protected input file. Apply both `20260926073434_cf_submission_metadata.sql` and `20260926130925_authorized_contests.sql` from `supabase/migrations/` before enabling writes. Grant the Cloud Run runtime identity `roles/secretmanager.secretAccessor` on those secrets.
+Add the encoded value to Secret Manager using an input file or stdin, avoiding terminal output. Provision the Supabase server-only secret key separately through the Google Cloud console or a protected input file. Apply the submission metadata, authorization, orchestrator, and wakeup migrations from `supabase/migrations/` in order before enabling autonomous mode. The new migration is `20260926174319_orchestrator_wakeups.sql`; it adds one persisted future task pointer and rating-check timestamp without changing already-applied migrations. Grant the Cloud Run runtime identity `roles/secretmanager.secretAccessor` on its secrets.
 
-With a Supabase project you control, apply pending migrations through the pinned CLI (review both SQL files first):
+With a Supabase project you control, apply pending migrations through the pinned CLI (review the pending SQL files first):
 
 ```bash
 npm exec --yes --package=supabase@2.118.0 -- supabase login
@@ -475,15 +485,87 @@ The optional watcher runs one short pass and exits. It uses fresh official `cont
 
 The watcher persists each run in `cf_contest_runs` and its first four official problem indices in `cf_contest_run_problems`. It uses a version check and a short run lease so concurrent invocations cannot both act on the same run. It records the state before an external mutation. Registration is clicked at most once in an invocation; a crash or uncertain response leads to a read-only status reconciliation before another controlled attempt. Confirmed registration activates authorization on the next pass, then the watcher waits for the official start time and persists the first four official problem indices. A previously `BLOCKED` run such as 2273 reopens to `WAITING_FOR_REGISTRATION` only when its recorded block was temporary, the contest is still upcoming strict Div.1, and the official profile and authenticated browser still match the configured account. Permanent blocks stay closed. Submission remains an explicit MCP action performed by Work. For orchestrated runs, the Supabase reservation function permits only the four selected indices and at most one prepared or confirmed attempt per problem. An uncertain attempt occupies that slot. The global `ALLOW_REAL_SUBMISSIONS` switch and dynamic `authorized_contests` check remain required.
 
-The four target windows, measured from official contest start, are P1 10–25, P2 30–50, P3 55–80, and P4 85–110 minutes. They are persisted as UTC timestamps. The watcher emits one deterministic GitHub branch, `.work-runs/<contestId>/pN.json` file, and PR per due problem. It checks for an existing PR first and resumes partially created branches/files; it never retries a mutating GitHub request after an uncertain network result in the same pass. P2 cannot trigger until P1 has a terminal verdict or has been marked missed. A missed window is recorded explicitly. The external scheduler invokes the next pass; no process sleeps through a contest.
+The four target windows, measured from official contest start, are P1 0–25, P2 25–50, P3 50–80, and P4 80–110 minutes. They are persisted as UTC timestamps. At official start, one pass persists the first four official problem indices and can trigger P1 immediately. The watcher emits one deterministic GitHub branch, `.work-runs/<contestId>/pN.json` file, and PR per due problem. It checks for an existing PR first and resumes partially created branches/files; it never retries a mutating GitHub request after an uncertain network result in the same pass. P2 cannot trigger until P1 has a terminal verdict or has been marked missed; the same applies through P4. If a predecessor finishes after the next earliest time, the next problem can trigger in the following pass while still inside its safety window. A missed window is recorded explicitly. Cloud Tasks invokes short future passes; no process sleeps through a contest.
 
 When a genuine Codeforces challenge appears during an authenticated operation, the run records `NEEDS_MANUAL_AUTH`, a pending operation, a safe reason code, and timestamps. Each later pass checks the existing session read-only, including the expected handle. For a pending submission it also opens a temporary page at the official submit URL to confirm the challenge is gone, without interacting with the form. If verification still appears or the account is wrong, the state stays blocked. After an operator completes the challenge in the already open dedicated Chrome profile, or refreshes the legitimate storage-state secret for a later process, the next pass resumes automatically from persisted state. It **first reads official registration status or account submissions**. A registered contest is accepted without another click; a not-registered result returns to the ready state and ends that pass. An unavailable interface returns to waiting unless a previous registration mutation is still uncertain. A confirmed submission ID is reused; no local attempt means the MCP mutation was not reached; a prepared or uncertain attempt without a provable ID stays `SUBMISSION_RESULT_UNCERTAIN`. No CAPTCHA, Turnstile, or Cloudflare interaction is automated. CDP mode keeps the operator's Chrome browser externally owned and open.
 
-The watcher reads only its own submission metadata and official account status, checking contest ID, problem index, and author handle. It never reads another contestant's source. After four terminal problem states it completes the Supabase contest authorization, then checks official `contest.ratingChanges` and `user.rating` for the specific contest/account for up to 72 hours. It does not infer a rating change from an unrelated future contest.
+The watcher reads only its own submission metadata and official account status, checking contest ID, problem index, and author handle. It never reads another contestant's source. After four terminal problem states it completes the Supabase contest authorization, then checks official `contest.ratingChanges` and `user.rating` for the specific contest/account for up to 72 hours. If the target contest has no rating-change entry yet, a fresh `user.info` profile difference is a fallback only when official rating history shows no later unrelated contest update. Rating checks are one hour after completion and about every three hours thereafter, until the 72-hour deadline.
+
+### Production wakeups and internal access
+
+```text
+Cloud Scheduler (every six hours) → protected Cloud Run reconciler → official Div.1 discovery
+                                           ↓
+                              Supabase versioned run + lease
+                                           ↓
+                          Cloud Tasks one-shot future wakeup
+                                           ↓
+              registration → authorization → exact contest start
+                                           ↓
+                  P1 immediately → GitHub PR → ChatGPT Work → MCP
+                                           ↓
+                     verdict → P2 → P3 → P4 → close authorization
+                                           ↓
+                            official rating reconciliation
+```
+
+For an unregistered upcoming contest, `planNextWakeup` uses **six hours** while start is more than 48 hours away, **one hour** from 12–48 hours, and **15 minutes** inside 12 hours. It caps a registration wakeup at contest start. A confirmed registration stops registration polling; the next pass activates exact-contest authorization, then schedules one start task at the official timestamp. Cloud Tasks delivery has normal service dispatch latency, so “exact” means the scheduled timestamp, not a hard real-time guarantee. A start more than 30 days away gets an interim wakeup within 29 days because Cloud Tasks limits schedule lead time. Pending Work/submission/verdict states use short one-shot reconciliation wakeups; manual verification uses 15-minute read-only recovery checks. The six-hour heartbeat can recreate a missing future task from Supabase metadata. Superseded task payloads are ignored by run ID, task name, and reason. Scheduling is version-checked under the existing short run lease. No five-minute GitHub cron, long sleep, or automatic resubmission is used.
+
+`POST /internal/orchestrator/reconcile` accepts either `{"reason":"discovery"}` from the heartbeat or a task payload containing `reason`, `runId`, `contestId`, and `taskName`. It is registered only when remote autonomous mode is enabled. Every request must carry a Google-signed OIDC ID token for `ORCHESTRATOR_SERVICE_URL`, issued for the exact `CLOUD_TASKS_SERVICE_ACCOUNT` email. Cloud Tasks requests must also match the task name header and the persisted run task. Invalid or absent identity receives HTTP 401; this endpoint does not use or weaken MCP OAuth. The Cloud Run service remains `--allow-unauthenticated` so ChatGPT can reach `/mcp`; application-level OIDC protects the internal route. Use the canonical `run.app` base URL for the ID-token audience. Cloud Tasks uses Application Default Credentials from the Cloud Run runtime identity to enqueue, inspect, and cancel tasks.
+
+Prepare infrastructure **after** reviewing migrations and before setting `EXPERIMENT_ENABLED=true`. These are operator commands; this repository does not run them automatically:
+
+```bash
+gcloud services enable cloudtasks.googleapis.com cloudscheduler.googleapis.com \
+  run.googleapis.com secretmanager.googleapis.com --project "$GCP_PROJECT_ID"
+export CLOUD_TASKS_QUEUE=cf-agent-reconcile
+export CLOUD_TASKS_SERVICE_ACCOUNT="cf-agent-internal@$GCP_PROJECT_ID.iam.gserviceaccount.com"
+export CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT="cf-agent-runtime@$GCP_PROJECT_ID.iam.gserviceaccount.com"
+gcloud iam service-accounts create cf-agent-internal --project "$GCP_PROJECT_ID"
+gcloud iam service-accounts create cf-agent-runtime --project "$GCP_PROJECT_ID"
+gcloud projects add-iam-policy-binding "$GCP_PROJECT_ID" \
+  --member="serviceAccount:$CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT" --role=roles/cloudtasks.enqueuer
+gcloud projects add-iam-policy-binding "$GCP_PROJECT_ID" \
+  --member="serviceAccount:$CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT" --role=roles/cloudtasks.viewer
+gcloud projects add-iam-policy-binding "$GCP_PROJECT_ID" \
+  --member="serviceAccount:$CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT" --role=roles/cloudtasks.taskDeleter
+gcloud iam service-accounts add-iam-policy-binding "$CLOUD_TASKS_SERVICE_ACCOUNT" \
+  --project "$GCP_PROJECT_ID" --member="serviceAccount:$CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT" \
+  --role=roles/iam.serviceAccountUser
+gcloud tasks queues create "$CLOUD_TASKS_QUEUE" --project "$GCP_PROJECT_ID" \
+  --location "$GCP_REGION" --max-concurrent-dispatches=1 --max-attempts=3
+```
+
+Check your project's IAM policy before adding bindings. Grant the runtime identity Secret Manager access to each required secret, after creating each secret through a protected input path:
+
+```bash
+export GITHUB_TRIGGER_TOKEN_SECRET_NAME=cf-github-trigger-token
+for secret_name in "$CF_STORAGE_STATE_SECRET_NAME" "$SUPABASE_SECRET_NAME" "$GITHUB_TRIGGER_TOKEN_SECRET_NAME"; do
+  gcloud secrets add-iam-policy-binding "$secret_name" --project "$GCP_PROJECT_ID" \
+    --member="serviceAccount:$CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT" \
+    --role=roles/secretmanager.secretAccessor
+done
+```
+
+If using the legacy Supabase service-role secret, replace `SUPABASE_SECRET_NAME` in that loop with `SUPABASE_SERVICE_ROLE_SECRET_NAME`. Grant the operator who creates Cloud Scheduler jobs permission to attach the internal service account. Set `ORCHESTRATOR_SERVICE_URL="$SERVICE_URL"` using the canonical Cloud Run base URL and `GITHUB_TRIGGER_REPO=YashYadav007/cf-agent-mcp` for the deploy helper. The repo-scoped token needs Contents and Pull requests write access. Deploy autonomous mode only after verifying the migration, identity, queue, OAuth, Codeforces session, GitHub token, and account handle. Leave `ALLOW_REAL_SUBMISSIONS=false` for the initial smoke test.
+
+Create the low-frequency heartbeat after the protected endpoint responds correctly to a valid internal OIDC token:
+
+```bash
+gcloud scheduler jobs create http cf-agent-discovery \
+  --project "$GCP_PROJECT_ID" --location "$GCP_REGION" \
+  --schedule '0 */6 * * *' --time-zone Etc/UTC \
+  --uri "$SERVICE_URL/internal/orchestrator/reconcile" --http-method POST \
+  --headers 'Content-Type=application/json' --message-body '{"reason":"discovery"}' \
+  --oidc-service-account-email "$CLOUD_TASKS_SERVICE_ACCOUNT" \
+  --oidc-token-audience "$SERVICE_URL"
+```
+
+Avoid duplicate job creation: if the job already exists, inspect/update it instead. Verify `/health` separately; it remains lightweight. Read Supabase `next_reconcile_at`, `next_reconcile_reason`, and `scheduled_task_name` when diagnosing a missed wakeup. A manual `orchestrator:once` also reconciles authoritative Codeforces/Supabase state; it does not need GitHub credentials until an actual PR trigger is due.
 
 ### Local operator commands
 
-Apply the new `20260926145600_cf_orchestrator.sql` migration only after reviewing it. The commands below are **not** executed by this repository's tests or build:
+Apply `20260926145600_cf_orchestrator.sql` and `20260926174319_orchestrator_wakeups.sql` only after reviewing them. The commands below are **not** executed by this repository's tests or build:
 
 ```bash
 npm exec --yes --package=supabase@2.118.0 -- supabase link --project-ref YOUR_PROJECT_REF
@@ -501,8 +583,8 @@ EXPERIMENT_ENABLED=true npm run orchestrator:once       # one mutating reconcili
 EXPERIMENT_ENABLED=true npm run orchestrator:contest -- 2273
 ```
 
-The last two commands can register a contest, activate authorization, and create a GitHub PR when the corresponding state and time window permit. They never submit source code themselves. Leave `ALLOW_REAL_SUBMISSIONS=false` until an explicitly approved real Work submission test. The GitHub Actions workflow `.github/workflows/codeforces-orchestrator.yml` runs every five minutes and supports manual dispatch. Configure repository variables `EXPERIMENT_ENABLED`, `EXPERIMENT_HANDLE`, `SUPABASE_URL`, `GITHUB_TRIGGER_REPO`; configure secrets `CF_STORAGE_STATE_B64`, `SUPABASE_SECRET_KEY`, `GITHUB_TRIGGER_TOKEN`. Its token must have permission to create branches, contents, and PRs in the trigger repository. The migration and credentials are prerequisites; the workflow does not apply migrations or deploy Cloud Run.
+The last two commands can register a contest, activate authorization, and create a GitHub PR when the corresponding state and time window permit. They never submit source code themselves. Leave `ALLOW_REAL_SUBMISSIONS=false` until an explicitly approved real Work submission test. The GitHub Actions workflow `.github/workflows/codeforces-orchestrator.yml` supports **manual dispatch only**; it has no cron. If using it as an operator recovery path, configure repository variables `EXPERIMENT_ENABLED`, `EXPERIMENT_HANDLE`, `SUPABASE_URL`, `GITHUB_TRIGGER_REPO`; configure secrets `CF_STORAGE_STATE_B64`, `SUPABASE_SECRET_KEY`, `GITHUB_TRIGGER_TOKEN`. Its token must have permission to create branches, contents, and PRs in the trigger repository. The workflow does not apply migrations or deploy Cloud Run.
 
 ### ChatGPT Work PR task contract
 
-Each PR's JSON file supplies `runId`, `contestId`, `problemOrdinal`, `problemIndex`, expected `handle`, and `Java 17`. Work should call MCP `get_problem`, derive an independent algorithm from the official statement, inspect constraints and edge cases, compile and test the Java 17 source with official examples, perform the documented clean refactoring pass, and call `submit_solution` exactly once with the final source. Work then reads the returned submission ID and calls `wait_for_verdict` or `get_submission_verdict`, reporting `{contestId, problemIndex, submissionId, verdict, language}`. Work must not inspect editorials, blogs, solution databases, or competitors' source. The controller accepts only its persisted submission metadata plus Codeforces' own account submission record as evidence; PR text alone cannot advance the run. If an action is uncertain or manual verification is required, Work must stop rather than retry the mutation.
+Each deterministic PR uses branch `cf-run/<contestId>/pN`, title `CF_RUN <contestId> PN <problemIndex>`, and payload `.work-runs/<contestId>/pN.json`. That JSON supplies `runId`, `contestId`, `problemOrdinal`, `problemIndex`, expected `handle`, `language:"JAVA_17"`, and a timestamp. Work should read that exact payload, use the connected CF Agent MCP to fetch that exact problem, derive an independent algorithm from the official statement, inspect constraints and edge cases, compile and test Java 17 against examples, perform the documented clean refactoring pass, and call `submit_solution` at most once with the final source. Work then reads the returned submission ID and calls `wait_for_verdict` or `get_submission_verdict`, reporting structured `{contestId, problemIndex, submissionId, verdict, language}`. Work must not inspect editorials, blogs, solution databases, or competitors' source. The controller accepts only persisted submission metadata plus Codeforces' own account submission record as evidence; PR text alone cannot advance the run. If an action is uncertain or manual verification is required, Work must stop rather than retry the mutation.

@@ -20,10 +20,13 @@ import { registerSubmissions } from './tools/submissions.js';
 import { registerSession } from './tools/session.js';
 import { registerContestRegistration } from './tools/registration.js';
 import { registerAccountProfile } from './tools/profile.js';
+import { createInternalOrchestrator } from './orchestrator/controller.js';
+import { registerInternalOrchestrator, type InternalOrchestrator } from './orchestrator/internalEndpoint.js';
 
 export interface AppOptions {
   host?: string; allowedHosts?: string[]; timeoutMs?: number; env?: NodeJS.ProcessEnv;
   verifier?: TokenVerifier; auth?: AuthSettings;
+  internalOrchestrator?: InternalOrchestrator;
 }
 export function createApp(options: AppOptions = {}, browser: BrowserAccess = codeforcesBrowser) {
   const env = options.env ?? process.env;
@@ -88,9 +91,13 @@ export function createApp(options: AppOptions = {}, browser: BrowserAccess = cod
   } };
   const app = createMcpExpressApp({ host, allowedHosts: effectiveHosts, jsonLimit: '2mb' });
   app.disable('x-powered-by');
-  app.locals.stopWrites = () => { submissions.stopWrites(); registrations.stopWrites(); };
+  let stopping = false;
+  app.locals.stopWrites = () => { stopping = true; submissions.stopWrites(); registrations.stopWrites(); };
   const nodeHandler = toNodeHandler(decoratedHandler);
   app.get('/health', (_req: Request, res: Response) => { res.json({ status: 'ok', service: 'cf-agent-mcp' }); });
+  const internal = options.internalOrchestrator ??
+    (env.EXPERIMENT_ENABLED === 'true' && !local ? createInternalOrchestrator(env, browser, options.timeoutMs ?? 15000) : undefined);
+  if (internal) registerInternalOrchestrator(app, internal, () => stopping);
   if (auth.oauth) {
     const metadata = protectedResource(auth.oauth);
     app.get(['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'], (_req: Request, res: Response) => res.json(metadata));

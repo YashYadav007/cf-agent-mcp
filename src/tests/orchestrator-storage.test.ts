@@ -45,8 +45,14 @@ test('Supabase watcher lease and version checks reject a competing pass', async 
   const claimed = await store.claim(2273, 'owner-one', now);
   assert.equal(claimed?.leaseOwner, 'owner-one');
   assert.equal(await store.claim(2273, 'owner-two', now), undefined);
-  const saved = await store.save({ ...claimed!, state: 'WAITING_FOR_REGISTRATION' });
+  const wakeupAt = '2030-10-01T13:00:00.000Z';
+  const taskName = 'projects/test-project/locations/us-central1/queues/cf-agent/tasks/abc123';
+  const saved = await store.save({ ...claimed!, state: 'WAITING_FOR_REGISTRATION',
+    nextReconcileAt: wakeupAt, nextReconcileReason: 'registration', scheduledTaskName: taskName });
   assert.equal(saved.version, claimed!.version + 1);
+  assert.equal(saved.nextReconcileAt, wakeupAt);
+  assert.equal(saved.nextReconcileReason, 'registration');
+  assert.equal(saved.scheduledTaskName, taskName);
   await assert.rejects(store.save({ ...claimed!, state: 'REGISTERED' }), { code: 'RUN_VERSION_CONFLICT' });
   assert.equal((await store.get(2273))?.state, 'WAITING_FOR_REGISTRATION');
 });

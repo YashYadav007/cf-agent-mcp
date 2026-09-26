@@ -1,9 +1,10 @@
 name: Codeforces experiment reconciliation
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'
   workflow_dispatch:
+
+# Cloud Scheduler and one-shot Cloud Tasks drive production reconciliation.
+# This workflow remains an intentional manual recovery/diagnostic path.
 
 concurrency:
   group: codeforces-experiment-reconciliation

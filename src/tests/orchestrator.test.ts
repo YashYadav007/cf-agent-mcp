@@ -4,6 +4,7 @@ import { CodeforcesError } from '../codeforces/errors.js';
 import type { Contest, Submission } from '../codeforces/types.js';
 import { selectUpcomingDiv1 } from '../contest/eligibility.js';
 import { GitHubWorkTrigger } from '../integrations/githubWorkTrigger.js';
+import type { WakeupRequest, WakeupScheduler } from '../integrations/cloudTasks.js';
 import { loadExperimentConfig } from '../orchestrator/config.js';
 import { transition } from '../orchestrator/stateMachine.js';
 import type { ExperimentRun, ProblemExecution, RunStore } from '../orchestrator/types.js';
@@ -64,6 +65,7 @@ function fixture() {
   let registrationStatus: 'not_registered' | 'registered' | 'verification_required' | 'registration_not_open' |
     'registration_closed' | 'rating_ineligible' | 'unknown' = 'not_registered';
   let registrationThrows: CodeforcesError | null = null;
+  let profileRating = 2051;
   let clicks = 0;
   let statusReads = 0;
   let authWrites = 0;
@@ -85,7 +87,7 @@ function fixture() {
     },
     browser: { getSessionStatus: async () => ({ authenticated: !!sessionHandle, handle: sessionHandle,
       method: 'cdp', message: '' }), probeSubmissionPage: async () => submissionPageClear },
-    profile: { getAccountProfile: async () => ({ handle: 'testaccount', rating: 2051, maxRating: 2051,
+    profile: { getAccountProfile: async () => ({ handle: 'testaccount', rating: profileRating, maxRating: profileRating,
       rank: 'candidate master', maxRank: 'candidate master' }) },
     registration: {
       status: async () => { statusReads++; return { contestId: contest.id, handle: sessionHandle, status: registrationStatus }; },
@@ -109,6 +111,7 @@ function fixture() {
     setSubmissionPageClear: (value: boolean) => { submissionPageClear = value; },
     setRegistration: (status: typeof registrationStatus) => { registrationStatus = status; },
     setRegistrationError: (error: CodeforcesError | null) => { registrationThrows = error; },
+    setProfileRating: (rating: number) => { profileRating = rating; },
     setSubmission: (records: Submission[], inputAttempts: SubmissionAttempt[], inputMetadata: SubmissionMetadata[]) => {
       submissionRecords = records; attempts = inputAttempts; metadata = inputMetadata;
     },
@@ -116,6 +119,17 @@ function fixture() {
     setContestApiUnavailable: (value: boolean) => { contestApiUnavailable = value; },
     counts: () => ({ clicks, statusReads, authWrites, triggerWrites }),
   };
+}
+
+function wakeupFixture() {
+  const live = new Map<string, WakeupRequest>();
+  let created = 0;
+  const scheduler: WakeupScheduler = {
+    schedule: async (input) => { const name = `task-${++created}`; live.set(name, input); return name; },
+    exists: async (name) => live.has(name),
+    cancel: async (name) => { live.delete(name); },
+  };
+  return { scheduler, live, drop: (name: string) => live.delete(name), created: () => created };
 }
 
 async function seed(f: ReturnType<typeof fixture>, state: ExperimentRun['state'] = 'DISCOVERED',
@@ -263,7 +277,7 @@ test('schedule persists only first four distinct official problems and fixed win
   const run = newExperimentRun(contest, 'testaccount', 2051);
   const problems = scheduleProblems(run, 'ABCDE'.split('').map((index) => ({ index })), config.windows);
   assert.deepEqual(problems.map((p) => p.problemIndex), ['A', 'B', 'C', 'D']);
-  assert.equal(problems[0]?.windowStart, new Date(start + 10 * 60_000).toISOString());
+  assert.equal(problems[0]?.windowStart, new Date(start).toISOString());
   assert.equal(problems[3]?.windowEnd, new Date(start + 110 * 60_000).toISOString());
 });
 test('dry run reads candidate and run state without claiming, clicking, authorizing, or triggering', async () => {
@@ -404,6 +418,17 @@ test('official contest-specific rating change stores delta without trusting a st
   assert.equal(f.runs.run?.ratingAfter, 2060); assert.equal(f.runs.run?.ratingDelta, 9);
   assert.equal(f.runs.run?.rankAfter, null);
 });
+test('fresh official profile comparison is a cautious rating fallback', async () => {
+  const f = fixture(); await seed(f, 'WAITING_FOR_RATING');
+  f.runs.run = { ...f.runs.run!, completedAt: '2030-10-02T14:00:00.000Z',
+    ratingDeadlineAt: '2030-10-05T14:00:00.000Z' };
+  f.setProfileRating(2060);
+  await f.watcher.once();
+  assert.equal(f.runs.run?.state, 'RATING_UPDATED');
+  assert.equal(f.runs.run?.ratingAfter, 2060);
+  assert.equal(f.runs.run?.ratingDelta, 9);
+  assert.equal(f.runs.run?.ratingSource, 'official_profile_comparison');
+});
 test('fourth terminal problem completes the run and closes contest authorization', async () => {
   const f = fixture(); await seed(f, 'PROBLEM_4_DONE');
   f.runs.run = { ...f.runs.run!, currentProblemOrdinal: 4, problemOrder: ['A', 'B', 'C', 'D'] };
@@ -431,6 +456,91 @@ test('enabled discovery creates a waiting-for-registration run without GitHub cr
   await new ExperimentWatcher(f.deps).once();
   assert.equal(f.runs.run?.state, 'WAITING_FOR_REGISTRATION');
   assert.equal(f.counts().triggerWrites, 0);
+});
+
+test('six-hour heartbeat repairs a lost future wakeup without repeating registration status', async () => {
+  const f = fixture(); const wakeups = wakeupFixture(); f.deps.scheduler = wakeups.scheduler;
+  f.setRegistration('registration_not_open');
+  const watcher = new ExperimentWatcher(f.deps);
+  await watcher.once({ heartbeat: true });
+  assert.equal(f.runs.run?.state, 'WAITING_FOR_REGISTRATION');
+  assert.equal(f.runs.run?.nextReconcileAt, '2030-10-01T13:00:00.000Z');
+  assert.equal(f.runs.run?.nextReconcileReason, 'registration');
+  const first = f.runs.run!.scheduledTaskName!;
+  await watcher.once({ heartbeat: true });
+  assert.equal(f.counts().statusReads, 1);
+  assert.equal(wakeups.created(), 1);
+  wakeups.drop(first);
+  await watcher.once({ heartbeat: true });
+  assert.equal(f.counts().statusReads, 1);
+  assert.equal(wakeups.created(), 2);
+  assert.notEqual(f.runs.run?.scheduledTaskName, first);
+});
+
+test('confirmed registration replaces polling with one exact start wakeup and immediately triggers A at start', async () => {
+  const f = fixture(); const wakeups = wakeupFixture(); f.deps.scheduler = wakeups.scheduler;
+  f.setRegistration('registered');
+  const watcher = new ExperimentWatcher(f.deps);
+  await watcher.once();
+  assert.equal(f.runs.run?.state, 'REGISTERED');
+  assert.equal(f.runs.run?.nextReconcileReason, 'start');
+  await watcher.once();
+  assert.equal(f.runs.run?.state, 'WAITING_FOR_START');
+  assert.equal(f.runs.run?.nextReconcileAt, f.runs.run?.contestStartAt);
+  assert.equal(f.counts().authWrites, 1);
+  const startTask = f.runs.run!.scheduledTaskName!;
+  await watcher.once({ heartbeat: true });
+  assert.equal(wakeups.created(), 2);
+  assert.equal(f.counts().statusReads, 1);
+  f.setNow('2030-10-02T12:00:00.000Z');
+  await watcher.once({ contestId: 2273, runId: f.runs.run!.runId, taskName: startTask, taskReason: 'start' });
+  assert.equal(f.runs.run?.state, 'PROBLEM_1_TRIGGERED');
+  assert.deepEqual(f.runs.problems.map((problem) => problem.problemIndex), ['A', 'B', 'C', 'D']);
+  assert.equal(f.runs.problems[0]?.windowStart, f.runs.run?.contestStartAt);
+  assert.equal(f.counts().triggerWrites, 1);
+  await watcher.once({ contestId: 2273, runId: f.runs.run!.runId, taskName: startTask, taskReason: 'start' });
+  assert.equal(f.counts().triggerWrites, 1);
+});
+
+test('a later problem stays serial until the preceding submission has a final verdict', async () => {
+  const f = fixture(); await seed(f, 'PROBLEM_1_TRIGGERED');
+  f.runs.run = { ...f.runs.run!, currentProblemOrdinal: 1, problemOrder: ['A', 'B', 'C', 'D'] };
+  await f.runs.createProblems(scheduleProblems(f.runs.run, 'ABCDE'.split('').map((index) => ({ index })), config.windows));
+  f.runs.problems[0]!.state = 'triggered';
+  f.runs.problems[0]!.triggeredAt = '2030-10-02T12:00:00.000Z';
+  f.setNow('2030-10-02T12:30:00.000Z');
+  await f.watcher.once();
+  assert.equal(f.runs.run?.state, 'PROBLEM_1_TRIGGERED');
+  assert.equal(f.counts().triggerWrites, 0);
+  const submittedAt = '2030-10-02T12:20:00.000Z';
+  const submission: Submission = { id: 123, contestId: 2273,
+    problem: { contestId: 2273, index: 'A', name: 'A', type: 'PROGRAMMING', tags: [] },
+    programmingLanguage: 'Java 17', verdict: 'OK', passedTestCount: 20,
+    timeConsumedMillis: 100, memoryConsumedBytes: 4096, author: { members: [{ handle: 'testaccount' }] } };
+  f.setSubmission([submission], [{ attemptId: 'attempt', contestId: 2273, problemIndex: 'A', language: 'java17',
+    submittedAt, fingerprint: 'a'.repeat(64), state: 'confirmed', submissionId: 123 }],
+  [{ submissionId: 123, contestId: 2273, problemIndex: 'A', language: 'java17', submittedAt }]);
+  await f.watcher.once(); assert.equal(f.runs.run?.state, 'PROBLEM_1_SUBMITTED');
+  await f.watcher.once(); assert.equal(f.runs.run?.state, 'PROBLEM_1_DONE');
+  assert.equal(f.counts().triggerWrites, 0);
+  await f.watcher.once(); assert.equal(f.runs.run?.state, 'WAITING_PROBLEM_2');
+  await f.watcher.once(); assert.equal(f.runs.run?.state, 'PROBLEM_2_TRIGGERED');
+  assert.equal(f.counts().triggerWrites, 1);
+});
+
+test('rating checks are deferred for one hour, then spaced three hours apart', async () => {
+  const f = fixture(); const wakeups = wakeupFixture(); f.deps.scheduler = wakeups.scheduler;
+  await seed(f, 'CONTEST_COMPLETE');
+  const watcher = new ExperimentWatcher(f.deps);
+  f.setNow('2030-10-02T14:00:00.000Z');
+  await watcher.once();
+  assert.equal(f.runs.run?.state, 'WAITING_FOR_RATING');
+  assert.equal(f.runs.run?.nextReconcileAt, '2030-10-02T15:00:00.000Z');
+  f.setNow('2030-10-02T15:00:00.000Z');
+  await watcher.once();
+  assert.equal(f.runs.run?.state, 'WAITING_FOR_RATING');
+  assert.equal(f.runs.run?.lastRatingCheckAt, '2030-10-02T15:00:00.000Z');
+  assert.equal(f.runs.run?.nextReconcileAt, '2030-10-02T18:00:00.000Z');
 });
 
 test('registration_not_open reconciliation does not validate GitHub credentials', async () => {

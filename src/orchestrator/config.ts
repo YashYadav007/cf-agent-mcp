@@ -23,7 +23,7 @@ export function loadExperimentConfig(env: NodeJS.ProcessEnv = process.env): Expe
     if (!env.CF_STORAGE_STATE_B64 && !env.CF_BROWSER_CDP_URL)
       throw new CodeforcesError('Configure a manually authenticated storage state or local CDP session.', 'EXPERIMENT_CONFIG_ERROR');
   }
-  const defaults = [[10, 25], [30, 50], [55, 80], [85, 110]] as const;
+  const defaults = [[0, 25], [25, 50], [50, 80], [80, 110]] as const;
   const windows = ORDINALS.map((ordinal) => {
     const fallback = defaults[ordinal - 1]!;
     const first = Number(env[`PROBLEM_${ordinal}_EARLIEST_MINUTE`] ?? fallback[0]);

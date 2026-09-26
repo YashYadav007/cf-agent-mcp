@@ -62,7 +62,7 @@ export class GitHubWorkTrigger implements WorkTrigger {
     const file = `.work-runs/${input.contestId}/p${input.ordinal}.json`;
     const content = Buffer.from(JSON.stringify({ experiment: 'authorized-codeforces-ai-agent',
       contestId: input.contestId, problemOrdinal: input.ordinal, problemIndex: input.problemIndex,
-      handle: input.handle, language: 'Java 17', createdAt: input.createdAt, runId: input.runId }, null, 2) + '\n').toString('base64');
+      handle: input.handle, language: 'JAVA_17', createdAt: input.createdAt, runId: input.runId }, null, 2) + '\n').toString('base64');
     const fileResponse = await this.request(`/contents/${file}?ref=${encodeURIComponent(branch)}`);
     if (fileResponse.status === 404) {
       const created = await this.request(`/contents/${file}`, { method: 'PUT', body: JSON.stringify({

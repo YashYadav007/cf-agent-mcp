@@ -8,9 +8,11 @@ import type { Contest, Submission } from '../codeforces/types.js';
 import { isFinalVerdict } from '../codeforces/verdicts.js';
 import { selectUpcomingDiv1, isDiv1Contest } from '../contest/eligibility.js';
 import type { WorkTrigger, WorkTriggerInput } from '../integrations/githubWorkTrigger.js';
+import type { WakeupScheduler } from '../integrations/cloudTasks.js';
 import type { ContestAuthorizationStore, SubmissionRecoveryStore } from '../storage/types.js';
 import type { ExperimentConfig } from './config.js';
 import { reconcileRating } from './ratingWatcher.js';
+import { planNextWakeup, type WakeupReason } from './scheduling.js';
 import { isAuthChallenge, ORDINALS, transition, type Ordinal, type PendingOperation, type RunState } from './stateMachine.js';
 import type { ExperimentRun, ProblemExecution, RunStore } from './types.js';
 
@@ -23,6 +25,7 @@ export interface WatcherDependencies {
   submissions: SubmissionRecoveryStore;
   authorization: ContestAuthorizationStore;
   trigger: WorkTrigger;
+  scheduler?: WakeupScheduler;
   config: ExperimentConfig;
   now?: () => Date;
   log?: (event: Record<string, unknown>) => void;
@@ -57,6 +60,7 @@ export function newExperimentRun(contest: Contest, handle: string, rating: numbe
     currentProblemOrdinal: null, problemOrder: [], lastErrorCode: null, lastErrorMessage: null,
     pendingOperation: null, authRequiredAt: null, authRecoveredAt: null, lastAuthCheckAt: null,
     recoveryReason: null, resumeState: null, ratingDeadlineAt: null, completedAt: null,
+    nextReconcileAt: null, nextReconcileReason: null, scheduledTaskName: null, lastRatingCheckAt: null,
     version: 0, leaseOwner: null, leaseExpiresAt: null,
   };
 }
@@ -106,6 +110,43 @@ export class ExperimentWatcher {
     await this.save(to, action, { authRecoveredAt: this.now().toISOString(), lastAuthCheckAt: this.now().toISOString(),
       pendingOperation: null, recoveryReason: null, resumeState: null, lastErrorCode: null,
       lastErrorMessage: null, ...patch }, { pendingOperation: this.run.pendingOperation });
+  }
+  private async syncWakeup(): Promise<void> {
+    const scheduler = this.deps.scheduler;
+    if (!scheduler) return; // Local manual runs can operate without Cloud Tasks.
+    const problem = this.run.currentProblemOrdinal ? (await this.deps.runs.listProblems(this.run.runId))
+      .find((item) => item.ordinal === this.run.currentProblemOrdinal) : undefined;
+    const desired = planNextWakeup(this.run, this.now(), problem);
+    const previous = this.run.scheduledTaskName;
+    if (!desired) {
+      if (previous) {
+        await this.save(this.run.state, 'WAKEUP_CLEARED', {
+          nextReconcileAt: null, nextReconcileReason: null, scheduledTaskName: null });
+        await scheduler.cancel(previous).catch(() => this.event('STALE_WAKEUP_CANCEL_FAILED', this.run.state));
+      }
+      return;
+    }
+    if (previous && this.run.nextReconcileAt === desired.runAt && this.run.nextReconcileReason === desired.reason &&
+        await scheduler.exists(previous)) return;
+    const repair = !!previous && this.run.nextReconcileAt === desired.runAt &&
+      this.run.nextReconcileReason === desired.reason;
+    const name = await scheduler.schedule({ runId: this.run.runId, contestId: this.run.contestId,
+      reason: desired.reason, runAt: desired.runAt, repair });
+    await this.save(this.run.state, 'WAKEUP_SCHEDULED', {
+      nextReconcileAt: desired.runAt, nextReconcileReason: desired.reason, scheduledTaskName: name,
+    }, { reason: desired.reason, runAt: desired.runAt });
+    if (previous && previous !== name)
+      await scheduler.cancel(previous).catch(() => this.event('STALE_WAKEUP_CANCEL_FAILED', this.run.state));
+  }
+  private async repairFutureWakeup(): Promise<boolean> {
+    const scheduler = this.deps.scheduler;
+    const { scheduledTaskName: name, nextReconcileAt: runAt, nextReconcileReason: reason } = this.run;
+    if (!scheduler || !name || !runAt || !reason || Date.parse(runAt) <= this.now().getTime()) return false;
+    if (await scheduler.exists(name)) return true;
+    const repaired = await scheduler.schedule({ runId: this.run.runId, contestId: this.run.contestId,
+      reason, runAt, repair: true });
+    await this.save(this.run.state, 'WAKEUP_REPAIRED', { scheduledTaskName: repaired }, { reason, runAt });
+    return true;
   }
   private async checkSession(): Promise<boolean> {
     const status = await this.deps.browser.getSessionStatus();
@@ -204,7 +245,8 @@ export class ExperimentWatcher {
     }
   }
   private async registration(contest: Contest): Promise<void> {
-    if (contest.phase !== 'BEFORE' || !isDiv1Contest(contest)) {
+    if (contest.phase !== 'BEFORE' || !isDiv1Contest(contest) ||
+        (contest.startTimeSeconds !== undefined && contest.startTimeSeconds * 1000 <= this.now().getTime())) {
       await this.save('BLOCKED', 'CONTEST_NOT_ELIGIBLE', { completedAt: this.now().toISOString() }); return;
     }
     // Fresh official rating and account identity on every eligibility pass.
@@ -283,7 +325,8 @@ export class ExperimentWatcher {
     }
     if (this.run.state === triggering) {
       const input: WorkTriggerInput = { runId: this.run.runId, contestId: this.run.contestId,
-        ordinal, problemIndex: problem.problemIndex, handle: this.run.handle, createdAt: problem.windowStart };
+        ordinal, problemIndex: problem.problemIndex, handle: this.run.handle,
+        createdAt: problem.triggeredAt ?? problem.windowStart };
       const result = await this.deps.trigger.ensure(input);
       await this.deps.runs.saveProblem({ ...problem, state: 'triggered', triggeredAt: problem.triggeredAt ?? problem.windowStart,
         githubBranch: result.branch, githubPrNumber: result.prNumber });
@@ -349,14 +392,23 @@ export class ExperimentWatcher {
       await this.deps.authorization.completeContest(this.run.contestId);
       await this.save('WAITING_FOR_RATING', 'CONTEST_AUTHORIZATION_COMPLETED', {
         ratingDeadlineAt: new Date(this.now().getTime() + 72 * 3600_000).toISOString() });
+      return; // The first rating check is a separate one-shot wakeup in about one hour.
     }
     if (this.run.state === 'WAITING_FOR_RATING') {
       const next = await reconcileRating(this.run, this.deps.api, this.deps.profile, this.now());
-      if (next.state !== this.run.state) await this.save(next.state, 'RATING_RECONCILED', next);
+      await this.save(next.state, 'RATING_RECONCILED', { ...next, lastRatingCheckAt: this.now().toISOString() });
     }
   }
-  async once(options: { dryRun?: boolean; contestId?: number } = {}): Promise<void> {
+  async once(options: { dryRun?: boolean; contestId?: number; runId?: string;
+    taskName?: string; taskReason?: WakeupReason; heartbeat?: boolean } = {}): Promise<void> {
     if (!this.deps.config.enabled && !options.dryRun) return;
+    if (options.taskName) {
+      const target = options.contestId ? await this.deps.runs.get(options.contestId) : undefined;
+      if (!target || target.runId !== options.runId || target.scheduledTaskName !== options.taskName ||
+          target.nextReconcileReason !== options.taskReason) {
+        this.log({ action: 'STALE_WAKEUP_IGNORED', contestId: options.contestId }); return;
+      }
+    }
     const existing = await this.deps.runs.listOpen();
     let contests: Contest[];
     try { contests = await this.deps.api.contests(false); }
@@ -382,8 +434,19 @@ export class ExperimentWatcher {
         runs: inspected });
       return;
     }
-    const selected = options.contestId ? upcoming.find((c) => c.id === options.contestId) : upcoming[0];
-    const selectedRun = selected ? await this.deps.runs.get(selected.id) : undefined;
+    let selected: Contest | undefined;
+    let selectedRun: ExperimentRun | undefined;
+    if (options.contestId) {
+      selected = upcoming.find((candidate) => candidate.id === options.contestId);
+      selectedRun = selected ? await this.deps.runs.get(selected.id) : undefined;
+    } else if (!existing.length) {
+      for (const candidate of upcoming) {
+        const prior = await this.deps.runs.get(candidate.id);
+        if (prior?.state === 'BLOCKED' &&
+            !canRecoverRegistrationBlock(prior, candidate, this.deps.config.handle, this.now())) continue;
+        selected = candidate; selectedRun = prior; break;
+      }
+    }
     if (selected && !selectedRun) {
       const profile = await this.deps.profile.getAccountProfile();
       if (profile.handle.toLowerCase() !== this.deps.config.handle.toLowerCase())
@@ -415,8 +478,18 @@ export class ExperimentWatcher {
       const claimed = await this.deps.runs.claim(open.contestId, randomUUID(), this.now());
       if (!claimed) continue;
       this.run = claimed;
+      if (options.taskName && (this.run.runId !== options.runId || this.run.scheduledTaskName !== options.taskName ||
+          this.run.nextReconcileReason !== options.taskReason)) {
+        await this.deps.runs.release(this.run);
+        this.log({ action: 'STALE_WAKEUP_IGNORED', contestId: open.contestId });
+        continue;
+      }
       this.event('RECONCILE_START', this.run.state);
-      try { await this.reconcile(contest); }
+      try {
+        if (options.heartbeat && await this.repairFutureWakeup()) continue;
+        await this.reconcile(contest);
+        await this.syncWakeup();
+      }
       catch (error) {
         const safe = publicError(error);
         if (isAuthChallenge(safe.code)) {

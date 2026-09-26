@@ -1,5 +1,6 @@
 node_modules
 dist
+coverage
 .git
 .env
 .env.*
@@ -12,6 +13,7 @@ supabase/.temp
 **/*session*.json
 **/*auth*.json
 data
+tmp-*.ts
 *.log
 playwright-report
 test-results

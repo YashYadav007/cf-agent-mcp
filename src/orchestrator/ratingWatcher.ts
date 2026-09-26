@@ -9,17 +9,29 @@ export async function reconcileRating(run: ExperimentRun,
   const profile = await profiles.getAccountProfile();
   if (profile.handle.toLowerCase() !== run.handle.toLowerCase()) return run;
   let change;
+  let history: Awaited<ReturnType<Pick<CodeforcesApi, 'userRating'>['userRating']>> | undefined;
   try {
     change = (await api.contestRatingChanges(run.contestId)).find((item) => item.handle.toLowerCase() === run.handle.toLowerCase());
   } catch { /* Some contests expose no rating changes yet. */ }
   if (!change) {
-    try { change = (await api.userRating(run.handle)).find((item) => item.contestId === run.contestId); }
+    try {
+      history = await api.userRating(run.handle);
+      change = history.find((item) => item.contestId === run.contestId);
+    }
     catch { /* no rating data yet */ }
   }
   if (change) return { ...run, ratingAfter: change.newRating, ratingDelta: change.newRating - change.oldRating,
     rankAfter: profile.rating === change.newRating ? profile.rank : null,
     maxRatingAfter: profile.rating === change.newRating ? profile.maxRating : null, ratedForAccount: true,
     ratingSource: 'official_rating_change', state: 'RATING_UPDATED' };
+  // A profile comparison is a fallback only when official history has no
+  // different contest rating update after this run began.
+  if (history && run.ratingBefore !== null && profile.rating !== null && profile.rating !== run.ratingBefore &&
+      !history.some((item) => item.contestId !== run.contestId &&
+        item.ratingUpdateTimeSeconds * 1000 >= Date.parse(run.contestStartAt)))
+    return { ...run, ratingAfter: profile.rating, ratingDelta: profile.rating - run.ratingBefore,
+      rankAfter: profile.rank, maxRatingAfter: profile.maxRating, ratedForAccount: true,
+      ratingSource: 'official_profile_comparison', state: 'RATING_UPDATED' };
   if (run.ratingDeadlineAt && now.getTime() >= Date.parse(run.ratingDeadlineAt))
     return { ...run, ratedForAccount: false, ratingSource: 'timeout', state: 'RATING_TIMEOUT' };
   return run;
