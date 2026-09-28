@@ -59,12 +59,41 @@ if [[ "$EXPERIMENT_ENABLED" == 'true' ]]; then
     *) ALLOWED_HOSTS="${ALLOWED_HOSTS},${ORCHESTRATOR_HOST}" ;;
   esac
 fi
-ENV_VALUES="AUTH_MODE=oauth@ALLOW_REAL_SUBMISSIONS=${ALLOW_REAL_SUBMISSIONS}@EXPERIMENT_ENABLED=${EXPERIMENT_ENABLED}@SUPABASE_URL=${SUPABASE_URL}@MCP_RESOURCE_URL=${MCP_RESOURCE_URL}@MCP_AUTH_ISSUER=${MCP_AUTH_ISSUER}@MCP_AUTH_AUDIENCE=${MCP_AUTH_AUDIENCE}@MCP_AUTH_JWKS_URL=${MCP_AUTH_JWKS_URL}@ALLOWED_HOSTS=${ALLOWED_HOSTS}@CF_STORAGE_STATE_B64_FILE=/var/secrets/cf/storage-state-b64"
-for optional_name in CF_HANDLE CF_EXPECTED_HANDLE CF_ALLOWED_CONTEST_IDS EXPERIMENT_HANDLE GITHUB_TRIGGER_REPO GCP_PROJECT_ID GCP_REGION CLOUD_TASKS_QUEUE ORCHESTRATOR_SERVICE_URL CLOUD_TASKS_SERVICE_ACCOUNT; do
-  if [[ -n "${!optional_name:-}" ]]; then
-    ENV_VALUES="${ENV_VALUES}@${optional_name}=${!optional_name}"
-  fi
-done
+# gcloud's --set-env-vars delimiter can appear inside values such as service
+# account emails. Write only an explicit nonsecret allowlist to a private YAML
+# file; JSON-quoted scalars are valid YAML and preserve punctuation/newlines.
+ENV_FILE="$(mktemp "${TMPDIR:-/tmp}/cf-agent-mcp-env.XXXXXX")"
+chmod 600 "$ENV_FILE"
+trap 'rm -f -- "$ENV_FILE"' EXIT
+export ALLOW_REAL_SUBMISSIONS EXPERIMENT_ENABLED ALLOWED_HOSTS SUPABASE_URL
+export MCP_RESOURCE_URL MCP_AUTH_ISSUER MCP_AUTH_AUDIENCE MCP_AUTH_JWKS_URL
+export CF_HANDLE CF_EXPECTED_HANDLE CF_ALLOWED_CONTEST_IDS EXPERIMENT_HANDLE GITHUB_TRIGGER_REPO
+export GCP_PROJECT_ID GCP_REGION CLOUD_TASKS_QUEUE ORCHESTRATOR_SERVICE_URL CLOUD_TASKS_SERVICE_ACCOUNT
+node - "$ENV_FILE" <<'NODE'
+const { writeFileSync } = require('node:fs');
+const required = {
+  AUTH_MODE: 'oauth',
+  ALLOW_REAL_SUBMISSIONS: process.env.ALLOW_REAL_SUBMISSIONS,
+  EXPERIMENT_ENABLED: process.env.EXPERIMENT_ENABLED,
+  SUPABASE_URL: process.env.SUPABASE_URL,
+  MCP_RESOURCE_URL: process.env.MCP_RESOURCE_URL,
+  MCP_AUTH_ISSUER: process.env.MCP_AUTH_ISSUER,
+  MCP_AUTH_AUDIENCE: process.env.MCP_AUTH_AUDIENCE,
+  MCP_AUTH_JWKS_URL: process.env.MCP_AUTH_JWKS_URL,
+  ALLOWED_HOSTS: process.env.ALLOWED_HOSTS,
+  CF_STORAGE_STATE_B64_FILE: '/var/secrets/cf/storage-state-b64',
+};
+const optional = [
+  'CF_HANDLE', 'CF_EXPECTED_HANDLE', 'CF_ALLOWED_CONTEST_IDS',
+  'EXPERIMENT_HANDLE', 'GITHUB_TRIGGER_REPO', 'GCP_PROJECT_ID', 'GCP_REGION',
+  'CLOUD_TASKS_QUEUE', 'ORCHESTRATOR_SERVICE_URL', 'CLOUD_TASKS_SERVICE_ACCOUNT',
+];
+for (const name of optional) {
+  if (process.env[name]) required[name] = process.env[name];
+}
+writeFileSync(process.argv[2], Object.entries(required)
+  .map(([name, value]) => `${name}: ${JSON.stringify(value)}\n`).join(''), { mode: 0o600 });
+NODE
 SECRET_VALUES="/var/secrets/cf/storage-state-b64=${CF_STORAGE_STATE_SECRET_NAME}:latest,${SUPABASE_KEY_BINDING}"
 if [[ -n "${GITHUB_TRIGGER_TOKEN_SECRET_NAME:-}" ]]; then
   SECRET_VALUES="${SECRET_VALUES},GITHUB_TRIGGER_TOKEN=${GITHUB_TRIGGER_TOKEN_SECRET_NAME}:latest"
@@ -80,5 +109,5 @@ gcloud run deploy "$CLOUD_RUN_SERVICE" \
   --cpu 1 --memory 1Gi --min-instances 0 --max-instances 1 \
   --concurrency 1 --timeout 300 \
   "${RUNTIME_IDENTITY[@]}" \
-  --set-env-vars "^@^${ENV_VALUES}" \
+  --env-vars-file "$ENV_FILE" \
   --set-secrets "$SECRET_VALUES"
