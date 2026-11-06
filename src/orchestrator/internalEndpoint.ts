@@ -28,7 +28,9 @@ export function registerInternalOrchestrator(app: Express, controller: InternalO
     }
     const parsed = internalReconcileInput.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: { code: 'INVALID_INPUT', message: 'Invalid reconciliation request.' } }); return; }
-    if (parsed.data.reason !== 'discovery' && req.headers['x-cloudtasks-taskname'] !== parsed.data.taskName) {
+    const taskId = parsed.data.reason === 'discovery' ? undefined :
+      parsed.data.taskName.split('/').at(-1);
+    if (parsed.data.reason !== 'discovery' && req.headers['x-cloudtasks-taskname'] !== taskId) {
       res.status(403).json({ error: { code: 'TASK_IDENTITY_MISMATCH', message: 'Cloud Task identity does not match.' } }); return;
     }
     try {
