@@ -110,7 +110,7 @@ test('internal scheduler endpoint rejects missing or invalid OIDC before reconci
     const taskName = 'projects/test-project/locations/us-central1/queues/cf-agent/tasks/abc123';
     const payload = { reason: 'start', runId: run.runId, contestId: 2273, taskName };
     assert.equal((await invoke('valid-oidc', payload)).status, 403);
-    assert.equal((await invoke('valid-oidc', payload, taskName)).status, 200);
+    assert.equal((await invoke('valid-oidc', payload, 'abc123')).status, 200);
     assert.equal(calls, 2);
     app.locals.stopWrites();
     assert.equal((await invoke('valid-oidc')).status, 503);
