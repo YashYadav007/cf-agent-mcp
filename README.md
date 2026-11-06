@@ -580,6 +580,7 @@ Set `SUPABASE_URL`, a server-only `SUPABASE_SECRET_KEY` or `SUPABASE_SERVICE_ROL
 npm run orchestrator:status                 # read-only Supabase state
 npm run orchestrator:status -- 2273         # one run
 npm run orchestrator:dry-run                # read-only candidate/state inspection
+npm run orchestrator:archive-stale -- 2273  # archive a finished pre-registration manual-auth run
 EXPERIMENT_ENABLED=true npm run orchestrator:once       # one mutating reconciliation pass
 EXPERIMENT_ENABLED=true npm run orchestrator:contest -- 2273
 ```
