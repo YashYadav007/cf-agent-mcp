@@ -25,6 +25,7 @@
     "orchestrator:status": "tsx scripts/orchestrator.ts status",
     "orchestrator:dry-run": "tsx scripts/orchestrator.ts dry-run",
     "orchestrator:contest": "tsx scripts/orchestrator.ts contest",
+    "orchestrator:archive-stale": "tsx scripts/archive-stale-run.ts",
     "browsers:install": "playwright install chromium",
     "test:browser": "tsx scripts/verify-browser.ts"
   },

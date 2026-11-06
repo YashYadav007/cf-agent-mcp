@@ -580,6 +580,7 @@ Set `SUPABASE_URL`, a server-only `SUPABASE_SECRET_KEY` or `SUPABASE_SERVICE_ROL
 npm run orchestrator:status                 # read-only Supabase state
 npm run orchestrator:status -- 2273         # one run
 npm run orchestrator:dry-run                # read-only candidate/state inspection
+npm run orchestrator:archive-stale -- 2273  # archive a finished pre-registration manual-auth run
 EXPERIMENT_ENABLED=true npm run orchestrator:once       # one mutating reconciliation pass
 EXPERIMENT_ENABLED=true npm run orchestrator:contest -- 2273
 ```
@@ -589,3 +590,6 @@ The last two commands can register a contest, activate authorization, and create
 ### ChatGPT Work PR task contract
 
 Each deterministic PR uses branch `cf-run/<contestId>/pN`, title `CF_RUN <contestId> PN <problemIndex>`, and payload `.work-runs/<contestId>/pN.json`. That JSON supplies `runId`, `contestId`, `problemOrdinal`, `problemIndex`, expected `handle`, `language:"JAVA_17"`, and a timestamp. Work should read that exact payload, use the connected CF Agent MCP to fetch that exact problem, derive an independent algorithm from the official statement, inspect constraints and edge cases, compile and test Java 17 against examples, perform the documented clean refactoring pass, and call `submit_solution` at most once with the final source. Work then reads the returned submission ID and calls `wait_for_verdict` or `get_submission_verdict`, reporting structured `{contestId, problemIndex, submissionId, verdict, language}`. Work must not inspect editorials, blogs, solution databases, or competitors' source. The controller accepts only persisted submission metadata plus Codeforces' own account submission record as evidence; PR text alone cannot advance the run. If an action is uncertain or manual verification is required, Work must stop rather than retry the mutation.
+
+
+`orchestrator:archive-stale` is a separate, guarded operator action. It checks official `contest.list` for a finished regular Div.1 contest, requires the exact `NEEDS_MANUAL_AUTH` / `registration_status` recovery state, no problem executions, and no active contest authorization. It acquires the run lease, cancels only the task name persisted on that run (and only from the configured queue), then transitions the run to `BLOCKED`. The previous recovery fields are retained in the run's audit message. It does not open Codeforces pages or inspect registration/login status, and it never registers, authorizes, or submits.
